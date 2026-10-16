@@ -120,6 +120,10 @@ class Store:
             " WHERE c.active AND p.due <= %s ORDER BY p.due, random() LIMIT 1", today)
         if row or not await self._new_left(today, new_per_day):
             return row
+        return await self.next_new(today)
+
+    async def next_new(self, today: date) -> dict | None:
+        """Новая карточка без учёта норм: для нормы и для вопросов сверх неё."""
         return await self._one(
             "WITH seen AS (SELECT c.topic, COUNT(*) AS n FROM progress p"
             " JOIN cards c ON c.id = p.card_id GROUP BY c.topic)"

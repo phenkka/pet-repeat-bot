@@ -18,10 +18,5 @@ def source(card) -> str:
     return f"<code>{html.escape(card['src'])}</code>"
 
 
-def answer(card) -> str:
-    return f"{question(card)}\n\n<b>Ответ</b>\n{text(card['a'])}\n\n{source(card)}"
-
-
-def verdict(card, ok: bool, days: int) -> str:
-    head = "Засчитано" if ok else "Не засчитано"
+def verdict(card, head: str, days: int) -> str:
     return f"<b>{head}</b>, снова через {days} дн.\n\n<b>Ответ</b>\n{text(card['a'])}\n\n{source(card)}"

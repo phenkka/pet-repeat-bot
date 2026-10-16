@@ -61,22 +61,59 @@ async def load_cards(store: Store, cfg: Config) -> str:
     return f"Новых: {added}, выключено: {off}, сокращений: {len(grader.ALIASES)}, споров закрыто: {solved}."
 
 
+async def extra_count(store: Store, chat_id: int, d) -> int | None:
+    """Сколько вопросов сверх нормы задано в текущей серии. None - серии нет.
+    Хранится как «дата:n», чтобы вчерашняя серия сегодня не продолжилась."""
+    day, _, n = (await store.get_meta(f"extra:{chat_id}") or "").partition(":")
+    return int(n) if day == d.isoformat() else None
+
+
+async def ask(bot: Bot, chat_id: int, store: Store, card, label: str, stop: bool) -> None:
+    # какой карточке адресован следующий текст из этого чата
+    await store.set_meta(f"current:{chat_id}", card["id"])
+    buttons = [("Не помню", f"n:{card['id']}")] + ([("Хватит", "stop")] if stop else [])
+    await bot.send_message(
+        chat_id, f"<b>{label}</b>\n{render.question(card)}\n\n<i>Ответ напиши сообщением.</i>",
+        reply_markup=kb(*buttons))
+
+
 async def send_next(bot: Bot, chat_id: int, store: Store, cfg: Config) -> None:
     d = today(cfg)
+    # норма: без «Хватит», номер из всей нормы дня
     card = await store.next_card(d, cfg.new_per_day, cfg.max_per_day)
     if card:
-        # какой карточке адресован следующий текст из этого чата
-        await store.set_meta(f"current:{chat_id}", card["id"])
-        await bot.send_message(chat_id, render.question(card) + "\n\n<i>Ответ напиши сообщением.</i>",
-                               reply_markup=kb(("Не помню", f"n:{card['id']}"), ("Хватит", "stop")))
+        done = await store.answered(d)
+        total = done + await store.to_do(d, cfg.new_per_day, cfg.max_per_day)
+        await ask(bot, chat_id, store, card, f"Вопрос {done + 1}/{total}", stop=False)
+        return
+    # сверх нормы: только новые карточки, своя нумерация до «Хватит»
+    n = await extra_count(store, chat_id, d)
+    if n is not None:
+        card = await store.next_new(d)
+        if card:
+            await store.set_meta(f"extra:{chat_id}", f"{d.isoformat()}:{n + 1}")
+            await ask(bot, chat_id, store, card, f"Дополнительный вопрос {n + 1}", stop=True)
+            return
+        await store.set_meta(f"extra:{chat_id}", "")
+        await store.set_meta(f"current:{chat_id}", "")
+        await bot.send_message(chat_id, "Новых карточек больше нет. Остальные придут по расписанию.")
         return
     await store.set_meta(f"current:{chat_id}", "")
     s = await store.stats(d)
+    more = "\n\nМожно ещё поотвечать: /go - новые карточки сверх нормы." if s["unseen"] else ""
     await bot.send_message(
         chat_id,
         f"На сегодня всё.\nЗнал: {s['ok_today']}, не знал: {s['fail_today']}.\n"
-        f"Завтра к повторению: {s['due_tomorrow']}.",
+        f"Завтра к повторению: {s['due_tomorrow']}.{more}",
     )
+
+
+async def go(bot: Bot, chat_id: int, store: Store, cfg: Config) -> None:
+    d = today(cfg)
+    # норма сделана - /go начинает серию сверх нормы, нумерация с 1
+    if not await store.next_card(d, cfg.new_per_day, cfg.max_per_day):
+        await store.set_meta(f"extra:{chat_id}", f"{d.isoformat()}:0")
+    await send_next(bot, chat_id, store, cfg)
 
 
 @router.message(Command("start"))
@@ -93,22 +130,26 @@ async def start(msg: Message, store: Store, cfg: Config):
 
 @router.message(Command("go"))
 async def go_cmd(msg: Message, bot: Bot, store: Store, cfg: Config):
-    await send_next(bot, msg.chat.id, store, cfg)
+    await go(bot, msg.chat.id, store, cfg)
 
 
 @router.callback_query(F.data == "go")
 async def go_btn(cb: CallbackQuery, bot: Bot, store: Store, cfg: Config):
     await cb.answer()
-    await send_next(bot, cb.message.chat.id, store, cfg)
+    await go(bot, cb.message.chat.id, store, cfg)
 
 
 @router.callback_query(F.data == "stop")
 async def stop(cb: CallbackQuery, store: Store, cfg: Config):
-    # карточка без оценки остаётся в сегодняшней норме
+    # «Хватит» есть только сверх нормы. карточка без ответа просто не засчитывается
     await cb.answer()
-    await store.set_meta(f"current:{cb.message.chat.id}", "")
+    chat_id = cb.message.chat.id
+    await store.set_meta(f"extra:{chat_id}", "")
+    await store.set_meta(f"current:{chat_id}", "")
     await cb.message.edit_reply_markup(reply_markup=None)
-    await cb.message.answer(f"Остановлено. Осталось сегодня: {await left(store, cfg)}. /go - продолжить.")
+    n = await left(store, cfg)
+    await cb.message.answer(f"Остановлено. По норме осталось: {n}. /go - продолжить." if n
+                            else "Остановлено. Ещё поотвечать - /go.")
 
 
 @router.callback_query(F.data.startswith("n:"))
@@ -119,7 +160,8 @@ async def dont_know(cb: CallbackQuery, bot: Bot, store: Store, cfg: Config):
         await cb.answer("Уже оценено")
         return
     await cb.answer()
-    await cb.message.edit_text(f"{render.answer(card)}\n\n<b>не помню</b>, снова через {days} дн.")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(render.verdict(card, "Не помню", days))
     await send_next(bot, cb.message.chat.id, store, cfg)
 
 
@@ -203,7 +245,8 @@ async def typed_answer(msg: Message, bot: Bot, store: Store, cfg: Config):
         # засчитанное можно только понизить. незасчитанное оспорить:
         # оценка не меняется, ответ уходит на разбор формулировок
         button = ("Всё равно не знал", f"d:{card['id']}") if ok else ("Оспорить", f"a:{card['id']}")
-        await msg.answer(render.verdict(card, ok, days), reply_markup=kb(button))
+        await msg.answer(render.verdict(card, "Засчитано" if ok else "Не засчитано", days),
+                         reply_markup=kb(button))
     await send_next(bot, msg.chat.id, store, cfg)
 
 
