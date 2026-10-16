@@ -54,7 +54,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 128m
+    mem_limit: 256m
     restart: unless-stopped
 
 networks:
