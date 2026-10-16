@@ -110,7 +110,9 @@ class Store:
         return max(0, new_per_day - started)
 
     async def next_card(self, today: date, new_per_day: int, max_per_day: int) -> dict | None:
-        """Сначала возвраты, самые старые первыми, затем новые по порядку файлов."""
+        """Сначала возвраты, самые старые первыми. Затем новые вперемешку по
+        темам: тема, из которой показано меньше всего, при равенстве порядок
+        тем свой на каждый день. Внутри темы - по порядку файла."""
         if await self.answered(today) >= max_per_day:
             return None
         row = await self._one(
@@ -119,8 +121,12 @@ class Store:
         if row or not await self._new_left(today, new_per_day):
             return row
         return await self._one(
-            "SELECT c.* FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
-            " WHERE c.active AND p.card_id IS NULL ORDER BY c.ord LIMIT 1")
+            "WITH seen AS (SELECT c.topic, COUNT(*) AS n FROM progress p"
+            " JOIN cards c ON c.id = p.card_id GROUP BY c.topic)"
+            " SELECT c.* FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
+            " LEFT JOIN seen s ON s.topic = c.topic"
+            " WHERE c.active AND p.card_id IS NULL"
+            " ORDER BY COALESCE(s.n, 0), md5(c.topic || %s), c.ord LIMIT 1", today.isoformat())
 
     async def to_do(self, today: date, new_per_day: int, max_per_day: int) -> int:
         """Сколько карточек бот покажет сегодня, если пройти всё."""
