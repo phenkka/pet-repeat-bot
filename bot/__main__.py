@@ -195,8 +195,7 @@ async def typed_answer(msg: Message, bot: Bot, store: Store, cfg: Config):
     if len(grader.tokens(msg.text)) < MIN_WORDS:
         await msg.answer("Коротко. Ответь, как на собесе: что происходит и почему.")
         return
-    keys = card["keys"]
-    hits, ok = grader.check(keys, card["need"], msg.text)
+    _, ok = grader.check(card["keys"], card["need"], msg.text)
     days = await store.grade(card["id"], ok, today(cfg), cfg.intervals, answer=msg.text)
     if days is None:
         await msg.answer("Эта карточка сегодня уже оценена.")
@@ -204,8 +203,7 @@ async def typed_answer(msg: Message, bot: Bot, store: Store, cfg: Config):
         # засчитанное можно только понизить. незасчитанное оспорить:
         # оценка не меняется, ответ уходит на разбор формулировок
         button = ("Всё равно не знал", f"d:{card['id']}") if ok else ("Оспорить", f"a:{card['id']}")
-        await msg.answer(render.verdict(card, [grader.label(k) for k in keys], hits, ok, days),
-                         reply_markup=kb(button))
+        await msg.answer(render.verdict(card, ok, days), reply_markup=kb(button))
     await send_next(bot, msg.chat.id, store, cfg)
 
 
