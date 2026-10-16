@@ -1,0 +1,69 @@
+name: repeat-bot
+
+services:
+  db:
+    image: postgres:16.15-alpine
+    user: "70:70"
+    environment:
+      POSTGRES_USER: repeat
+      POSTGRES_DB: repeat
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "repeat", "-d", "repeat"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    restart: unless-stopped
+
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      CARDS_DIR: /app/cards
+      DB_HOST: db
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - ./cards:/app/cards:ro
+    networks:
+      - internal
+      - default
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    restart: unless-stopped
+
+networks:
+  internal:
+    internal: true
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+
+volumes:
+  pgdata:

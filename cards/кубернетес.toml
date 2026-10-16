@@ -1,0 +1,155 @@
+# Kubernetes. Лекция спецкурса УЦСБ «Основы Kubernetes».
+# kind М: по методичке. keys: варианты через |.
+
+[[card]]
+id = "k8s-pod-pause"
+q = "Что общего у контейнеров одного пода и зачем в каждом поде pause-контейнер?"
+a = """Контейнеры пода делят Linux namespaces (сеть, IPC) и всегда на одной ноде: ходят друг к другу по localhost.
+pause-контейнер создаётся первым и держит эти namespaces. Остальные контейнеры пода к ним присоединяются, поэтому рестарт приложения не ломает сеть пода."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:45-69"
+kind = "М"
+keys = [
+  "namespace | сеть общ | localhost | одна нода | одной нод",
+  "pause | держит namespace | первым",
+]
+
+[[card]]
+id = "k8s-deploy-strategy"
+q = "Deployment обновляет приложение: чем Recreate отличается от RollingUpdate?"
+a = """Recreate сначала убивает все старые поды, потом поднимает новые - есть простой.
+RollingUpdate заменяет постепенно, сервис не прерывается. Deployment создаёт новый ReplicaSet и перекладывает поды на него."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:45-69"
+kind = "М"
+keys = [
+  "recreate | убив все | простой | сначала все",
+  "rolling | постепенн | без прерыв | по очеред",
+]
+
+[[card]]
+id = "k8s-liveness-readiness"
+q = "Провалилась liveness-проба, а в другом поде - readiness. Что сделает Kubernetes в каждом случае?"
+a = """liveness провалена - kubelet перезапускает контейнер.
+readiness провалена - под убирается из Service и не получает трафик, но не перезапускается.
+startup - для медленного старта, пока не прошла, две другие не проверяются."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:70-89"
+kind = "М"
+keys = [
+  "liveness | перезапуск | рестарт",
+  "readiness | трафик | убира из service | балансир | не перезапуск",
+]
+
+[[card]]
+id = "k8s-secret-base64"
+q = "Secret в Kubernetes «в закодированном виде». Насколько он защищён и чем его защищают на самом деле?"
+a = """base64 - кодирование, а не шифрование: `base64 -d` вернёт значение любому, кто может прочитать объект.
+Защищают RBAC (кто может get secrets) и шифрование etcd at rest. Иначе доступ к etcd или его бэкапу = все секреты."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:90-102, 249-262"
+kind = "М"
+keys = [
+  "не шифр | кодирован | base64 | декод | любой прочита",
+  "rbac | etcd | шифрован at rest | encryption | права на чтение",
+]
+
+[[card]]
+id = "k8s-service-types"
+q = "ClusterIP, NodePort, LoadBalancer - чем отличаются и какой из них чаще всего становится нежданной дырой наружу?"
+a = """ClusterIP - адрес только внутри кластера. NodePort - порт 30000-32767 на ВСЕХ нодах, доступ по IP любой ноды. LoadBalancer - внешний балансировщик поверх NodePort.
+Дыра - NodePort: открывает порт сразу на каждой ноде, часто забывают."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:103-121"
+kind = "М"
+keys = [
+  "clusterip | внутри кластер",
+  "nodeport | все нод | 30000",
+  "loadbalancer | балансировщ | внешн",
+]
+need = 2
+
+[[card]]
+id = "k8s-ingress-controller"
+q = "Создал Ingress с правилами, а трафик снаружи не доходит. Что первым проверить?"
+a = """Есть ли в кластере Ingress Controller (nginx, HAProxy, Istio) и совпадает ли ingressClassName. Ingress - только правила, применяет их контроллер.
+Дальше: Service и его selector, порты, pathType."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:103-121"
+kind = "М"
+keys = [
+  "controller | контроллер | ingressclass",
+  "только правила | сам не | применя",
+]
+need = 1
+
+[[card]]
+id = "k8s-pv-pvc"
+q = "Зачем три сущности PV, PVC и StorageClass, если поду просто нужен диск?"
+a = """PV - реальный кусок хранилища. PVC - запрос пода: объём, режим доступа, класс. StorageClass - правила, по которым PV создаётся динамически.
+Под знает только PVC и не зависит от того, где хранилище. reclaimPolicy решает, удалится ли PV после удаления PVC (Delete) или останется (Retain)."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:122-147"
+kind = "М"
+keys = [
+  "pv | хранилищ | реальн",
+  "pvc | запрос",
+  "storageclass | динамич | правила создан",
+]
+need = 2
+
+[[card]]
+id = "k8s-apiserver-etcd"
+q = "Почему kube-apiserver и etcd защищают в первую очередь?"
+a = """etcd хранит всё состояние кластера, включая Secret'ы. Ходит в etcd только API-сервер.
+Через API-сервер работают все компоненты и мы: доступ к нему с правами = управление кластером. Отсюда RBAC, закрытый etcd и шифрование at rest."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:162-190"
+kind = "М"
+keys = [
+  "etcd | состояни | все данные | секрет",
+  "api | все компонент | единственн | управлен кластер | rbac",
+]
+
+[[card]]
+id = "k8s-scheduler-taints"
+q = "На ноду с taint не садятся обычные поды. Как всё-таки посадить туда, например, агент мониторинга?"
+a = """Добавить поду toleration на этот taint. Taint отталкивает поды, toleration разрешает конкретному поду сесть.
+Агенты на каждую ноду обычно DaemonSet с tolerations. Кроме этого scheduler смотрит requests, nodeSelector, affinity и приоритет."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:191-208, 234-248"
+kind = "М"
+keys = [
+  "toleration | толеран",
+  "taint | отталкива | daemonset",
+]
+need = 1
+
+[[card]]
+id = "k8s-qos-eviction"
+q = "QoS-классы подов: как их получить и кого выселят первым при нехватке памяти на ноде?"
+a = """BestEffort - нет requests и limits. Burstable - requests меньше limits. Guaranteed - requests равны limits.
+При нехватке памяти первыми выселяются BestEffort, последними Guaranteed."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:191-208"
+kind = "М"
+keys = [
+  "besteffort | без requests | нет лимит",
+  "guaranteed | равны | requests = limits",
+  "первым | выселя | evict",
+]
+need = 2
+
+[[card]]
+id = "k8s-cni-flannel"
+q = "Написал NetworkPolicy, а трафик между подами всё равно ходит. Кластер на Flannel. Почему?"
+a = """Kubernetes сам сеть не реализует, это делает CNI-плагин. Flannel - простой оверлей без поддержки сетевых политик: NetworkPolicy есть, применять её некому.
+Нужен CNI с политиками: Calico, Cilium, Canal."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:209-221"
+kind = "М"
+keys = [
+  "flannel | не поддерж | без политик | некому примен",
+  "calico | cilium | canal | cni",
+]
+
+[[card]]
+id = "k8s-statefulset-vs-deploy"
+q = "Почему базу данных в Kubernetes кладут в StatefulSet, а не в Deployment?"
+a = """StatefulSet даёт подам постоянную идентичность: стабильные имена, порядок запуска и у каждого свой PVC (volumeClaimTemplates), нужен headless Service.
+В Deployment поды взаимозаменяемы, без привязки к своему диску и имени."""
+src = "kubernetes/теория/основы-абстракции-и-компоненты.md:234-248"
+kind = "М"
+keys = [
+  "идентичн | стабильн имя | порядок",
+  "свой pvc | свой диск | volumeclaimtemplate | headless",
+]

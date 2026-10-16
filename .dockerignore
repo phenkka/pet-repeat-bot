@@ -1,0 +1,8 @@
+.env
+secrets/
+cards/
+__pycache__/
+*.py[cod]
+.venv/
+.git
+README.md
