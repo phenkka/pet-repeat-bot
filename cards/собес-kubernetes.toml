@@ -1,0 +1,504 @@
+# Собес: Kubernetes. Вопросы ZUBAT, ответы пересказаны просто.
+# kind М: чужой материал, руками не проверялось. keys: варианты через |.
+
+[[card]]
+id = "z-k8s-spread-zones"
+q = "В облаке 3 зоны доступности. Как сделать, чтобы поды приложения легли по зонам равномерно?"
+a = """Сам по себе scheduler может положить все реплики в одну зону — упадёт зона, упадёт и приложение.
+Современный способ — topologySpreadConstraints: указываешь ключ метки зоны (topology.kubernetes.io/zone) и допустимый перекос maxSkew: 1 — разница в числе подов между зонами не больше одного.
+Старый способ — podAntiAffinity: «не клади под рядом с таким же» по метке зоны. Он грубее: при числе реплик больше числа зон с жёстким правилом лишние поды не сядут.
+Коротко: topologySpreadConstraints по метке зоны с maxSkew; старый вариант — podAntiAffinity."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:63-70"
+kind = "М"
+keys = [
+  "topologyspread | topology spread | maxskew",
+  "antiaffinity | anti affinity | зон",
+]
+need = 1
+
+[[card]]
+id = "z-kube-proxy"
+q = "За что отвечает kube-proxy и как он это делает?"
+a = """Service — это виртуальный адрес (ClusterIP), за которым стоят поды. Сам по себе этот адрес никуда не ведёт. kube-proxy на каждой ноде следит за сервисами и их подами через API и пишет правила (iptables, IPVS или nftables): пакет на ClusterIP:порт — подменить адрес на IP одного из живых подов.
+То есть kube-proxy делает так, чтобы обращение к Service доходило до пода на любой ноде. Сам трафик через процесс kube-proxy не идёт — его перенаправляет ядро по этим правилам. С Cilium kube-proxy можно вообще убрать: то же делает eBPF.
+Коротко: kube-proxy превращает ClusterIP сервиса в правила iptables/IPVS на каждой ноде, ведущие на поды."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:101-106"
+kind = "М"
+keys = [
+  "service | clusterip | сервис",
+  "iptables | ipvs | nftables | правил",
+]
+
+[[card]]
+id = "z-kubectl-apply-flow"
+q = "Выполнил `kubectl apply -f deployment.yaml`. Что происходит по шагам до запущенных контейнеров?"
+a = """1. kubectl отправляет объект в kube-apiserver.
+2. API-сервер: кто ты (аутентификация) → можно ли тебе (RBAC) → admission (может дополнить или отклонить) → запись в etcd.
+3. Контроллер Deployment видит новый Deployment и создаёт ReplicaSet, контроллер ReplicaSet создаёт поды (пока без ноды).
+4. Scheduler видит поды без ноды и выбирает каждому ноду.
+5. kubelet на выбранной ноде видит назначенный ему под и через container runtime (containerd) скачивает образ и запускает контейнеры, CNI даёт поду сеть.
+Все компоненты общаются только с API-сервером через watch, в etcd ходит только он.
+Коротко: apiserver (authn, RBAC, admission, etcd) → контроллеры создают ReplicaSet и поды → scheduler выбирает ноду → kubelet запускает."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:183-192"
+kind = "М"
+keys = [
+  "apiserver | api сервер | api-server",
+  "etcd",
+  "replicaset | контроллер | controller",
+  "scheduler | планировщик",
+  "kubelet",
+]
+need = 4
+
+[[card]]
+id = "z-hpa"
+q = "Как работает HPA и что нужно в кластере, чтобы он заработал?"
+a = """HPA (Horizontal Pod Autoscaler) сам меняет число реплик по метрике: например, держать средний CPU подов на 70% — нагрузка выросла, добавил подов, упала — убрал.
+Чтобы работал, нужен metrics-server (он собирает потребление CPU и памяти). И у подов должны быть заданы requests — процент считается от них. Без requests HPA не знает, от чего считать.
+Для своих метрик — адаптер Prometheus, для событий (длина очереди) — KEDA, она умеет и масштабировать до нуля.
+Коротко: HPA меняет число реплик по метрике; нужны metrics-server и requests у подов."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:433-442"
+kind = "М"
+keys = [
+  "реплик | число под | масштаб",
+  "metrics-server | metrics server",
+  "requests | запрос",
+]
+need = 2
+
+[[card]]
+id = "z-apiserver-stages"
+q = "Через какие этапы проходит запрос в kube-apiserver, прежде чем объект попадёт в etcd? Где тут работает Kyverno?"
+a = """1. Аутентификация — кто ты: сертификат, токен ServiceAccount, OIDC.
+2. Авторизация — можно ли тебе это действие: RBAC.
+3. Mutating admission — объект можно дополнить: подставить значения по умолчанию, добавить sidecar.
+4. Проверка схемы объекта.
+5. Validating admission — последняя проверка, можно отклонить: квоты, Pod Security, вебхуки, ValidatingAdmissionPolicy.
+6. Запись в etcd.
+Kyverno и Gatekeeper работают как admission-вебхуки (шаги 3 и 5): именно поэтому они могут не пустить под с root.
+Коротко: аутентификация → авторизация (RBAC) → mutating admission → валидация → validating admission → etcd; Kyverno — admission."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:515-527"
+kind = "М"
+keys = [
+  "аутентифик | authn | кто ты",
+  "авторизац | rbac | authz",
+  "admission | вебхук | webhook",
+]
+need = 3
+
+[[card]]
+id = "z-probe-mistakes"
+q = "Почему liveness-проба не должна проверять базу данных? Какие ещё ошибки в пробах частые?"
+a = """Если liveness проверяет базу, то при падении базы kubelet начнёт перезапускать все поды приложения разом. База поднимется — а приложение лежит в перезапусках. Это каскадный отказ. Liveness должна проверять только сам процесс: жив ли он. Зависимости — дело readiness.
+Ещё ошибки: liveness и readiness одинаковые; маленький таймаут (по умолчанию 1 секунда) — под нагрузкой ложные перезапуски; медленный старт без startupProbe — liveness убивает приложение, пока оно грузится; нет readiness — трафик идёт в неготовый под при обновлении.
+Коротко: liveness на базу = каскадные перезапуски всех подов; liveness — только сам процесс, зависимости — readiness."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:543-564"
+kind = "М"
+keys = [
+  "каскад | все поды | перезапуск всех | разом",
+  "только процесс | сам процесс | readiness",
+  "startup | таймаут | timeout",
+]
+need = 2
+
+[[card]]
+id = "z-oomkilled-vs-throttling"
+q = "Чем OOMKilled отличается от CPU throttling, и почему одно убивает, а другое только тормозит?"
+a = """Память — ресурс, который нельзя «сжать»: если процесс превысил лимит памяти, отнять у него уже занятое нельзя, поэтому ядро его убивает. Это OOMKilled, код 137. Видно в `kubectl describe pod` (Last State: OOMKilled).
+CPU можно «сжать»: при достижении лимита процесс не убивают, а просто не дают ему процессор до следующего короткого периода. Это троттлинг — приложение живо, но растут задержки.
+Поэтому для чувствительных к задержкам сервисов CPU limit часто не ставят совсем, оставляя только requests. А для JVM и Go учитывают лимит памяти контейнера в настройках.
+Коротко: память несжимаема — превысил лимит, убит (137); CPU сжимаем — превысил, троттлинг и задержки."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:581-595"
+kind = "М"
+keys = [
+  "памят | memory | 137 | убива",
+  "cpu | троттл | throttl | задержк | тормоз",
+]
+
+[[card]]
+id = "z-native-sidecar"
+q = "Что такое нативный sidecar в Kubernetes и какую проблему Job он решил?"
+a = """Нативный sidecar — это init-контейнер с `restartPolicy: Always`. Он запускается до основных контейнеров и останавливается после них.
+Зачем: прокси service mesh или агент секретов готов раньше, чем стартует приложение; логи досылаются до конца.
+Проблема Job: раньше sidecar был обычным вторым контейнером. Основная задача Job завершилась, а sidecar (например, сборщик логов) продолжал работать — и под никогда не становился Succeeded, Job висел. Нативный sidecar останавливается сам после основных контейнеров.
+Коротко: init-контейнер с restartPolicy Always — стартует до и останавливается после основных; Job больше не виснет из-за sidecar."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:596-620"
+kind = "М"
+keys = [
+  "init | restartpolicy always | always",
+  "до | раньше | после",
+  "job | succeeded | висн | не заверш",
+]
+need = 2
+
+[[card]]
+id = "z-graceful-shutdown"
+q = "При каждом выкатывании часть запросов падает с ошибкой. Как устроено завершение пода и как сделать обновление без потерь?"
+a = """При удалении пода одновременно происходят две вещи: его убирают из списка адресов сервиса (балансировщики узнают об этом не мгновенно) и kubelet шлёт приложению SIGTERM. Из-за этой гонки приложение может закрыться, пока на него ещё идут запросы.
+Что делают:
+preStop со sleep на 5–10 секунд — дать балансировщикам убрать под из трафика до SIGTERM;
+приложение на SIGTERM дорабатывает текущие запросы, а не обрывается;
+PID 1 передаёт сигналы (exec form или tini);
+terminationGracePeriodSeconds с запасом, readinessProbe и PDB.
+Коротко: удаление из сервиса и SIGTERM идут одновременно; preStop sleep, обработка SIGTERM и readiness убирают потери."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:621-641"
+kind = "М"
+keys = [
+  "prestop | sleep",
+  "sigterm | сигнал",
+  "endpoint | балансир | из сервис | гонк | трафик",
+]
+need = 2
+
+[[card]]
+id = "z-rollout-undo"
+q = "Новая версия Deployment сломалась. Как откатить, и что задают maxSurge и maxUnavailable?"
+a = """Откат: `kubectl rollout undo deploy/web` (или `--to-revision=3`), история — `kubectl rollout history deploy/web`. Deployment хранит старые ReplicaSet (по умолчанию 10), поэтому откат быстрый: просто снова масштабируется старый набор.
+При RollingUpdate: maxSurge — сколько подов можно создать сверх нужного числа реплик; maxUnavailable — сколько могут быть недоступны одновременно. По умолчанию оба 25%. maxUnavailable: 0 — обновление без снижения мощности.
+Canary и blue-green встроенный Deployment не умеет — для них Argo Rollouts, Flagger или веса в Gateway API.
+Коротко: kubectl rollout undo; maxSurge — сколько сверх, maxUnavailable — сколько недоступно при обновлении."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:642-660"
+kind = "М"
+keys = [
+  "rollout undo | undo",
+  "maxsurge | сверх",
+  "maxunavailable | недоступн",
+]
+need = 2
+
+[[card]]
+id = "z-cronjob-concurrency"
+q = "CronJob бэкапа запускается каждый час, а бэкап иногда идёт дольше часа. Что настроить, чтобы два бэкапа не шли одновременно?"
+a = """concurrencyPolicy у CronJob: Allow (по умолчанию) — запустит второй параллельно с первым; Forbid — пропустит новый запуск, пока идёт старый; Replace — убьёт старый и запустит новый. Для бэкапа — Forbid.
+Ещё полезное: startingDeadlineSeconds — насколько можно опоздать с запуском; у Job — backoffLimit (сколько повторов при ошибке), activeDeadlineSeconds (общий таймаут), ttlSecondsAfterFinished (удалить завершённые). Ручной запуск: `kubectl create job manual-1 --from=cronjob/backup`.
+Коротко: concurrencyPolicy: Forbid — не запускать новый, пока идёт старый (по умолчанию Allow — параллельно)."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:661-681"
+kind = "М"
+keys = [
+  "concurrencypolicy | concurrency",
+  "forbid",
+]
+
+[[card]]
+id = "z-static-pods"
+q = "Удаляешь под kube-apiserver через kubectl delete, а он сразу появляется снова. Почему и как он запущен?"
+a = """Это static pod. Им управляет kubelet ноды напрямую, без API-сервера: kubelet читает манифесты из каталога (в kubeadm — /etc/kubernetes/manifests) и запускает поды сам. Так работают сами компоненты control plane — apiserver, scheduler, controller-manager, etcd: им же нужно запуститься, когда API-сервера ещё нет.
+В API видна только его «зеркальная» копия. Удалишь её — kubelet пересоздаст. Остановить — убрать файл манифеста из каталога, изменить — отредактировать файл.
+С точки зрения безопасности: кто может писать в этот каталог на ноде, тот запускает что угодно мимо RBAC и admission.
+Коротко: static pod — kubelet запускает его из /etc/kubernetes/manifests сам; в API только зеркало; управлять — файлом манифеста."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:682-693"
+kind = "М"
+keys = [
+  "static | статическ",
+  "kubelet",
+  "manifests | манифест | файл",
+]
+need = 2
+
+[[card]]
+id = "z-external-traffic-local"
+q = "Приложение за Service LoadBalancer видит IP ноды вместо IP клиента. Почему и что даёт `externalTrafficPolicy: Local`?"
+a = """По умолчанию (Cluster) запрос, пришедший на любую ноду, может уйти в под на другой ноде. Для этого адрес отправителя подменяется на адрес ноды (SNAT) — и под видит IP ноды, а не клиента. Плюс лишний сетевой переход.
+Local — трафик обслуживают только поды на той ноде, куда он пришёл. Подмены нет, под видит настоящий IP клиента (важно для логов, rate limit, белых списков). Ноды без подов не проходят проверку балансировщика и трафик не получают.
+Минус: если поды разложены неравномерно, нагрузка тоже будет неравномерной.
+Коротко: Cluster делает SNAT, и под видит IP ноды; Local обслуживает на той же ноде и сохраняет IP клиента."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:718-731"
+kind = "М"
+keys = [
+  "snat | подмен | ip ноды",
+  "local | ip клиент | на той же нод",
+]
+
+[[card]]
+id = "z-gateway-api"
+q = "Чем Gateway API лучше Ingress, и почему вопрос стал актуальным в 2026?"
+a = """Ingress умеет только простую маршрутизацию HTTP по имени и пути. Всё сложнее (веса для canary, заголовки, таймауты) задаётся аннотациями, у каждого контроллера своими — при смене контроллера всё переписывать.
+Gateway API разделяет роли: GatewayClass — тип реализации, Gateway — точка входа с портами и TLS (её ведёт платформенная команда), HTTPRoute и другие маршруты — их пишут команды приложений. Веса, заголовки, зеркалирование — в стандарте, а не в аннотациях. Есть TCP, UDP, gRPC.
+Актуально потому, что ingress-nginx с марта 2026 больше не поддерживается — в том числе не выходят исправления безопасности.
+Коротко: Ingress — простые правила + несовместимые аннотации; Gateway API — роли и стандартные возможности; ingress-nginx с 2026 без поддержки."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:732-748"
+kind = "М"
+keys = [
+  "аннотац | у каждого свои | непереносим",
+  "роли | gateway | httproute | route",
+  "ingress-nginx | без поддержк | не поддержива | 2026",
+]
+need = 2
+
+[[card]]
+id = "z-ndots-5"
+q = "Поды долго резолвят внешние имена, а CoreDNS перегружен. Причём тут ndots:5?"
+a = """kubelet прописывает подам в resolv.conf `ndots:5` и список search-доменов кластера. Правило: если в имени меньше 5 точек, сначала перебираются все search-домены. Запрос api.example.com превращается в api.example.com.default.svc.cluster.local, ...svc.cluster.local, ...cluster.local — и только потом настоящий. Каждый — по A и AAAA. Большинство кончаются NXDOMAIN: лишняя нагрузка на CoreDNS и задержка.
+Лечат: писать внешние имена с точкой в конце (api.example.com.), снизить ndots в dnsConfig пода, поставить NodeLocal DNSCache.
+Коротко: при ndots:5 короткое имя сначала перебирает все search-домены — лишние запросы; лечат точкой в конце или меньшим ndots."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:784-797"
+kind = "М"
+keys = [
+  "search | перебир | лишн запрос",
+  "точк в конц | точкой | fqdn | dnsconfig | меньш ndots | nodelocal",
+]
+
+[[card]]
+id = "z-configmap-reload"
+q = "Поменял ConfigMap, а приложение работает со старыми настройками. Почему?"
+a = """Зависит от того, как ConfigMap передан.
+Через переменные окружения — они читаются только при старте контейнера. Нужен перезапуск: `kubectl rollout restart deploy/web`.
+Через том (файлы) — kubelet обновит файлы сам, но с задержкой до минуты, и приложение должно само перечитать файл.
+Через subPath — не обновляется никогда.
+Автоматизировать: хэш конфига в аннотации пода (в Helm checksum/config) — изменился конфиг, изменился под, Deployment перекатится. Или Reloader.
+Коротко: env читается только при старте — нужен rollout restart; том обновится сам с задержкой; subPath — никогда."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:814-828"
+kind = "М"
+keys = [
+  "env | переменн | при старт",
+  "том | volume | файл | subpath",
+  "restart | перезапуск | checksum | reloader",
+]
+need = 2
+
+[[card]]
+id = "z-sa-token-projected"
+q = "Как в современном Kubernetes выдаётся токен ServiceAccount поду, и что изменилось с 1.24?"
+a = """Раньше на каждый ServiceAccount автоматически создавался Secret с вечным токеном. Утёк — работает навсегда.
+С 1.24 такие токены сами не создаются. Под получает короткоживущий токен через projected volume: он привязан к конкретному поду и назначению, kubelet сам его обновляет. Под удалён — токен недействителен. Разовый токен для человека — `kubectl create token ci --duration=1h`.
+Если поду API не нужен, монтирование токена вообще отключают: `automountServiceAccountToken: false`.
+Коротко: с 1.24 вместо вечного токена в Secret — короткоживущий projected-токен, привязанный к поду; не нужен API — отключить автомонтирование."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:845-862"
+kind = "М"
+keys = [
+  "короткоживущ | projected | привязан к под",
+  "вечн | долгоживущ | 1.24",
+  "automount",
+]
+need = 2
+
+[[card]]
+id = "z-priorityclass"
+q = "Что такое PriorityClass и preemption, и чем это опасно, если раздать высокий приоритет кому попало?"
+a = """PriorityClass — объект с числом-приоритетом, под ссылается на него через priorityClassName. Если важный под не помещается ни на одну ноду, scheduler выгоняет (preemption) поды с меньшим приоритетом, чтобы освободить место. Приоритет учитывается и при выселении при нехватке ресурсов.
+Опасность: если любой может создать под с высоким приоритетом, он может вытеснить чужие важные поды — это способ уронить соседей. Поэтому использование высоких классов ограничивают квотами. Системные классы system-cluster-critical и system-node-critical — только для компонентов кластера.
+Коротко: приоритет пода; важный под может вытеснить менее важные; раздача высокого приоритета всем — способ выгнать чужие поды."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:910-928"
+kind = "М"
+keys = [
+  "приоритет | priority",
+  "вытесн | preempt | выгоня",
+]
+
+[[card]]
+id = "z-quota-limitrange"
+q = "Зачем на namespace команды ставят ResourceQuota и LimitRange вместе?"
+a = """ResourceQuota ограничивает сумму на весь namespace: сколько всего CPU, памяти, подов, дисков может взять команда. Одна команда не съест весь кластер.
+LimitRange задаёт правила для каждого отдельного контейнера: requests и limits по умолчанию, минимум и максимум.
+Вместе потому, что при включённой квоте под без requests/limits просто не создастся. LimitRange подставляет значения по умолчанию — и поды без явных ресурсов не ломаются.
+Коротко: ResourceQuota — сколько всего на namespace, LimitRange — значения по умолчанию и рамки на контейнер; без LimitRange поды без ресурсов отклонит квота."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:929-951"
+kind = "М"
+keys = [
+  "quota | квот | сумм | весь namespace",
+  "limitrange | по умолчан | default | на контейнер",
+]
+
+[[card]]
+id = "z-pdb"
+q = "От чего защищает PodDisruptionBudget, а от чего нет? Почему из-за него может навсегда зависнуть drain?"
+a = """PDB говорит: «у этого приложения одновременно должно работать минимум N подов» (minAvailable) или «не больше M недоступно» (maxUnavailable). Работает только для добровольных прерываний — drain ноды, обновление нод, автоскейлер. От падения ноды или OOM не защищает.
+drain зависнет навсегда, если minAvailable равен числу реплик (или maxUnavailable: 0) — выгнать нельзя ни один под. Та же беда с PDB на Deployment с одной репликой.
+Проверить: `kubectl get pdb` — колонка ALLOWED DISRUPTIONS; если 0, drain будет ждать.
+Коротко: PDB — минимум живых подов при добровольных прерываниях (drain), не при падениях; minAvailable = реплики — drain виснет."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:952-972"
+kind = "М"
+keys = [
+  "добровольн | drain | обновлен нод",
+  "не защища | падени нод | oom",
+  "minavailable | реплик | одна реплик | allowed",
+]
+need = 2
+
+[[card]]
+id = "z-drain-node"
+q = "Как безопасно вывести ноду на обслуживание, и что при этом может потеряться?"
+a = """`kubectl cordon node1` — запретить новые поды; `kubectl drain node1 --ignore-daemonsets --delete-emptydir-data` — выселить поды (с учётом PDB); после работ `kubectl uncordon node1`.
+Что может потеряться или не переехать:
+данные emptyDir — удалятся (поэтому флаг надо указать явно);
+«голые» поды без контроллера — не пересоздадутся, нужен --force;
+поды с локальным диском (local PV) — не запустятся на другой ноде;
+поды DaemonSet и static pods не выселяются.
+Перед обслуживанием смотреть `kubectl get pdb -A` — не заблокирует ли бюджет.
+Коротко: cordon → drain → работы → uncordon; теряются emptyDir и голые поды, local PV не переедут."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:997-1016"
+kind = "М"
+keys = [
+  "cordon",
+  "drain",
+  "emptydir | голые | без контроллер | local",
+]
+need = 2
+
+[[card]]
+id = "z-helm-vs-kustomize"
+q = "Helm или Kustomize - чем отличаются и когда что брать?"
+a = """Helm — пакетный менеджер: чарт — это шаблоны плюс values.yaml. Установленный чарт — релиз с историей версий: можно откатить (`helm rollback`). Есть зависимости и хуки. Хорош для чужих приложений с кучей параметров.
+Kustomize — без шаблонов: базовые манифесты плюс оверлеи с патчами под окружения (dev, prod). Встроен в kubectl: `kubectl apply -k overlays/prod`. Релизов и истории нет. Хорош для своих манифестов, которые немного отличаются между окружениями.
+Часто сочетают: Kustomize поверх того, что выдал Helm, — так умеют и Argo CD, и Flux.
+Коротко: Helm — шаблоны, релизы, откат, для чужих чартов; Kustomize — патчи поверх базы без шаблонов, для своих манифестов."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1017-1035"
+kind = "М"
+keys = [
+  "helm | шаблон | релиз | rollback",
+  "kustomize | патч | оверле | overlay | без шаблон",
+]
+
+[[card]]
+id = "z-gitops-pull"
+q = "Что такое GitOps и почему pull-модель безопаснее, чем деплой из CI командой kubectl?"
+a = """GitOps: желаемое состояние кластера описано в git, а агент внутри кластера (Argo CD или Flux) постоянно сверяет git с реальностью и приводит кластер к нему. Изменения — через merge request, откат — revert коммита. Ручные правки в кластере видно, и агент их исправит.
+Безопаснее потому, что CI больше не нужен доступ к кластеру. При push-модели в CI лежат учётные данные с правами деплоить в прод — взломали CI, получили кластер. При pull агент сам тянет изменения изнутри, а снаружи в кластер никто не ходит.
+Argo CD — с веб-интерфейсом и многими кластерами из одного места; Flux — набор контроллеров без обязательного UI.
+Коротко: агент в кластере тянет состояние из git; CI не нужен доступ к кластеру — взлом CI не даёт кластер."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1036-1047"
+kind = "М"
+keys = [
+  "git | желаем состояни | декларатив",
+  "агент | argo | flux | pull | тянет",
+  "ci не нужен | доступ к кластер | учетн | без доступ",
+]
+need = 2
+
+[[card]]
+id = "z-finalizer-terminating"
+q = "Namespace завис в Terminating на несколько дней. Что такое finalizer и почему так бывает?"
+a = """Finalizer — пометка на объекте «перед удалением надо прибраться». Пока она стоит, объект при удалении не исчезает, а ждёт: контроллер должен выполнить очистку (удалить облачный балансировщик, диск) и снять пометку.
+Если контроллер, который должен снять finalizer, удалён или сломан, — пометку никто не снимет. Объект висит, а вместе с ним и весь namespace в Terminating.
+Правильно — починить или вернуть контроллер. Крайняя мера — снять finalizer руками (kubectl patch с пустыми finalizers), понимая, что внешние ресурсы (балансировщик, диск) останутся висеть и стоить денег.
+Коротко: finalizer ждёт, пока контроллер приберётся; контроллер сломан — никто не снимет, namespace висит; чинить контроллер, снимать руками — крайний случай."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1048-1064"
+kind = "М"
+keys = [
+  "finalizer | пометк | очистк | прибра",
+  "контроллер | оператор | сломан | удален",
+]
+
+[[card]]
+id = "z-cri-crictl"
+q = "Почему Kubernetes больше не работает с Docker, сломаются ли твои образы, и чем смотреть контейнеры на ноде?"
+a = """kubelet общается с container runtime через интерфейс CRI. Docker его не реализует, и раньше работал через прослойку dockershim — её удалили в 1.24. Теперь на нодах containerd или CRI-O, а они запускают контейнеры через runc.
+Образы не сломаются: Docker собирает стандартные OCI-образы, их запускает любой runtime.
+На ноде вместо docker — crictl: `crictl ps -a`, `crictl logs <id>`, `crictl inspect <id>`, `crictl pull`. У containerd ещё есть ctr (образы Kubernetes в namespace k8s.io) и nerdctl.
+Коротко: Docker не умеет CRI, dockershim убрали в 1.24; образы OCI работают; на ноде — crictl."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1065-1084"
+kind = "М"
+keys = [
+  "cri | dockershim",
+  "oci | образ работа | не слома",
+  "crictl | containerd | ctr",
+]
+need = 2
+
+[[card]]
+id = "z-etcd-backup"
+q = "Как сделать бэкап etcd, и что в нём есть и чего нет?"
+a = """Снапшот: `etcdctl snapshot save /backup/etcd.db` с сертификатами etcd (в kubeadm они в /etc/kubernetes/pki/etcd/). Восстановление — `etcdutl snapshot restore` в новый каталог, затем перенастроить etcd на этот каталог (через его манифест static pod).
+В бэкапе всё состояние кластера, включая все Secret. Значит, бэкап надо шифровать и хранить вне кластера — кто получил бэкап, получил все секреты.
+Чего нет: данных в томах (PV). Их бэкапят отдельно — Velero или снапшотами CSI.
+Коротко: etcdctl snapshot save; там все Secret — шифровать и хранить снаружи; данных PV там нет — Velero."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1102-1122"
+kind = "М"
+keys = [
+  "snapshot | снапшот | etcdctl",
+  "secret | секрет | шифр",
+  "pv | том | velero",
+]
+need = 2
+
+[[card]]
+id = "z-crashloopbackoff"
+q = "Под в CrashLoopBackOff. Как ищешь причину?"
+a = """CrashLoopBackOff: контейнер запускается и падает, kubelet перезапускает его со всё большей паузой.
+1. `kubectl describe pod` — Last State, код выхода, Reason, события.
+2. `kubectl logs <pod> --previous` — логи предыдущего, упавшего запуска (текущий может ещё ничего не написать).
+Код выхода: 1 и подобные — ошибка приложения (нет переменной или секрета, неверный конфиг, недоступна база); 137 — убит (OOMKilled или по liveness-пробе — смотреть события); 139 — segfault; 0 — процесс просто завершился (не та команда, ушёл в фон).
+Нет логов — проверить command/args, права на файлы, readOnlyRootFilesystem. Отладить копией с другой командой: `kubectl debug <pod> -it --copy-to=dbg --container=app -- sh`.
+Коротко: describe (код выхода, события) и logs --previous; 1 — приложение, 137 — OOM или liveness, 0 — процесс завершился."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1123-1142"
+kind = "М"
+keys = [
+  "describe",
+  "previous | --previous | прошл",
+  "код выход | exit code | 137 | oom",
+]
+need = 2
+
+[[card]]
+id = "z-imagepullbackoff"
+q = "Под в ImagePullBackOff. Какие причины и где смотреть?"
+a = """Смотреть в `kubectl describe pod` — в событиях kubelet обычно прямо пишет причину.
+Причины:
+опечатка в имени или теге, тег удалён — not found / manifest unknown;
+приватный registry без imagePullSecrets или с неверным секретом — unauthorized, 401/403;
+секрет лежит в другом namespace (должен быть в namespace пода);
+лимит Docker Hub — 429 Too Many Requests;
+нода не достаёт до registry: сеть, прокси, DNS, самоподписанный сертификат registry;
+образ не под архитектуру ноды.
+Проверить с ноды: `crictl pull образ`.
+Коротко: describe pod покажет причину; обычно опечатка в теге, нет imagePullSecrets, лимит Docker Hub или нода не достаёт до registry."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1143-1162"
+kind = "М"
+keys = [
+  "describe | событ | events",
+  "тег | опечат | not found | имя образ",
+  "imagepullsecret | секрет | unauthorized | 401 | авторизац",
+  "registry | сеть | 429 | лимит | сертификат",
+]
+need = 2
+
+[[card]]
+id = "z-pod-pending"
+q = "Под висит в Pending. Что проверяешь?"
+a = """Pending — scheduler не может найти поду ноду (или ещё ждёт). Первое — `kubectl describe pod`: в событии FailedScheduling scheduler пишет причину по каждой группе нод, например «3 Insufficient cpu, 2 had untolerated taint».
+Причины:
+не хватает ресурсов по requests (не по реальной нагрузке!) — смотреть Allocated resources в `kubectl describe node`;
+taint без toleration, неподходящие nodeSelector, affinity, spread;
+PVC не привязан — нет StorageClass или диск в другой зоне;
+ноды cordoned или NotReady.
+Если превышена ResourceQuota — пода вообще нет, ошибка в событиях ReplicaSet.
+Коротко: describe pod → FailedScheduling; обычно не хватает ресурсов по requests, taint, affinity или не привязан PVC."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1163-1180"
+kind = "М"
+keys = [
+  "describe | failedscheduling | событ",
+  "requests | ресурс | insufficient",
+  "taint | affinity | nodeselector | pvc",
+]
+need = 2
+
+[[card]]
+id = "z-node-notready"
+q = "Нода перешла в NotReady. Что смотришь и что будет с подами на ней?"
+a = """NotReady — kubelet перестал сообщать, что нода жива, или сам сообщил о проблеме.
+Смотреть: `kubectl describe node` — Conditions (MemoryPressure, DiskPressure, NetworkUnavailable). На самой ноде: `systemctl status kubelet containerd`, `journalctl -u kubelet`, `df -h`, `free -m`.
+Частые причины: kubelet упал (ошибка конфига, истёк его сертификат), упал containerd, не работает CNI, кончился диск или память, нет сети до API-сервера, сбилось время (ломается TLS).
+Поды: примерно через 5 минут их выселят и пересоздадут на других нодах. Кроме StatefulSet — их не пересоздают, пока не подтверждено, что нода выключена (чтобы не было двух копий с одним диском).
+Коротко: describe node и журнал kubelet на ноде; причины — kubelet, runtime, CNI, диск, сертификат; через ~5 минут поды переедут, StatefulSet — нет."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1196-1214"
+kind = "М"
+keys = [
+  "kubelet",
+  "containerd | cni | диск | сертификат | runtime",
+  "5 минут | выселя | пересозда | statefulset",
+]
+need = 2
+
+[[card]]
+id = "z-kubectl-debug-node"
+q = "Что умеет `kubectl debug` и почему `kubectl debug node/...` - это фактически root на ноде?"
+a = """kubectl debug добавляет в работающий под временный (эфемерный) контейнер с твоими утилитами: `kubectl debug -it pod/web --image=busybox --target=app` — видны процессы контейнера app. Ещё можно сделать копию пода с другой командой (--copy-to).
+`kubectl debug node/node1 -it --image=ubuntu` создаёт под в namespace самой ноды, а корень ноды монтирует в /host. Это root на ноде: `chroot /host` — и ты на ноде.
+Поэтому право создавать такие поды (и pods/ephemeralcontainers) — опасное, его дают только админам кластера.
+Коротко: эфемерный контейнер с утилитами в работающий под; debug node монтирует корень ноды в /host — это root на ноде."""
+src = "kubernetes/теория/собес-zubat-kubernetes.md:1215-1231"
+kind = "М"
+keys = [
+  "эфемерн | временн контейнер | ephemeral",
+  "host | корень нод | root на нод | chroot",
+]

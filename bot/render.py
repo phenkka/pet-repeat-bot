@@ -2,6 +2,7 @@ import html
 import re
 
 CODE_RE = re.compile(r"`([^`]+)`")
+MD_RE = re.compile(r"\.md\b")
 
 
 def text(s: str) -> str:
@@ -14,8 +15,9 @@ def question(card) -> str:
 
 
 def source(card) -> str:
-    # в <code>: иначе Telegram делает из «файл.md» ссылку на домен .md
-    return f"<code>{html.escape(card['src'])}</code>"
+    # без «.md»: иначе Telegram делает из «файл.md» ссылку на домен .md
+    src = MD_RE.sub("", card["src"])
+    return f"<i>{html.escape(src)}</i>"
 
 
 def verdict(card, head: str, days: int) -> str:
