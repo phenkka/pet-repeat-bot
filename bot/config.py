@@ -14,8 +14,6 @@ class Config:
     tz: ZoneInfo
     remind_at: time
     nudge_at: time
-    new_per_day: int
-    max_per_day: int
     intervals: tuple[int, ...]
     cards_dir: Path
     db: str
@@ -32,9 +30,6 @@ def load() -> Config:
         tz=ZoneInfo(os.environ.get("TZ_NAME", "Asia/Yekaterinburg")),
         remind_at=time.fromisoformat(os.environ.get("REMIND_AT", "13:00")),
         nudge_at=time.fromisoformat(os.environ.get("NUDGE_AT", "20:00")),
-        # норма дня: возвраты, а оставшееся место добивается новыми
-        new_per_day=int(os.environ.get("NEW_PER_DAY", "15")),
-        max_per_day=int(os.environ.get("MAX_PER_DAY", "15")),
         intervals=tuple(int(x) for x in os.environ.get("INTERVALS", "1,3,7,21,60").split(",")),
         cards_dir=Path(os.environ.get("CARDS_DIR", "cards")),
         # пароль из файла (секрет compose), а не из переменной: env видно в docker inspect

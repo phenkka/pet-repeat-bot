@@ -1,6 +1,9 @@
 # Угрозы самому CI/CD и основы DevSecOps. Спецкурс УЦСБ (Зайцев Д.).
 # kind М: по методичке. keys: варианты через |.
 
+# кнопка в меню бота. несколько файлов могут вести на одну
+theme = "DevSecOps"
+
 [[card]]
 id = "ppe-direct"
 q = "Что такое Direct PPE (Poisoned Pipeline Execution) и почему права на `.gitlab-ci.yml` равны правам на раннер?"

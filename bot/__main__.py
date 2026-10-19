@@ -12,7 +12,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
 
 from . import cards, config, grader, render
 from .config import Config
-from .store import Store
+from .store import ALL, Store
 
 log = logging.getLogger("repeat-bot")
 # короче этого не ответ, а отписка
@@ -38,15 +38,15 @@ def kb(*buttons: tuple[str, str]) -> InlineKeyboardMarkup:
     ]])
 
 
-GO = kb(("Продолжить", "go"))
+ALL_LABEL = "Всё вперемешку"
 
 
 def today(cfg: Config):
     return datetime.now(cfg.tz).date()
 
 
-async def left(store: Store, cfg: Config) -> int:
-    return await store.to_do(today(cfg), cfg.new_per_day, cfg.max_per_day)
+def name(theme: str) -> str:
+    return ALL_LABEL if theme == ALL else theme
 
 
 async def load_cards(store: Store, cfg: Config) -> str:
@@ -61,95 +61,113 @@ async def load_cards(store: Store, cfg: Config) -> str:
     return f"Новых: {added}, выключено: {off}, сокращений: {len(grader.ALIASES)}, споров закрыто: {solved}."
 
 
-async def extra_count(store: Store, chat_id: int, d) -> int | None:
-    """Сколько вопросов сверх нормы задано в текущей серии. None - серии нет.
-    Хранится как «дата:n», чтобы вчерашняя серия сегодня не продолжилась."""
-    day, _, n = (await store.get_meta(f"extra:{chat_id}") or "").partition(":")
-    return int(n) if day == d.isoformat() else None
+async def menu(store: Store, cfg: Config) -> tuple[str, InlineKeyboardMarkup]:
+    """Меню тем. На кнопке: к повторению сегодня + ещё не показано."""
+    rows = await store.themes(today(cfg))
+    due, fresh = sum(r["due"] for r in rows), sum(r["fresh"] for r in rows)
+    buttons = [(f"{ALL_LABEL} · {due}+{fresh}", f"t:{ALL}")]
+    buttons += [(f"{r['theme']} · {r['due']}+{r['fresh']}", f"t:{r['theme']}") for r in rows]
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, callback_data=d) for t, d in buttons[i:i + 2]]
+        for i in range(0, len(buttons), 2)
+    ])
+    return (f"Выбери тему. На кнопке: к повторению сегодня + ещё не показано.\n"
+            f"К повторению сегодня: {due}."), markup
 
 
-async def ask(bot: Bot, chat_id: int, store: Store, card, label: str, stop: bool) -> None:
+async def show_menu(bot: Bot, chat_id: int, store: Store, cfg: Config, head: str = "") -> None:
+    text, markup = await menu(store, cfg)
+    await bot.send_message(chat_id, f"{head}\n\n{text}" if head else text, reply_markup=markup)
+
+
+async def session(store: Store, chat_id: int, d) -> tuple[str, int] | None:
+    """Текущая тема и сколько вопросов в ней задано. None - темы нет.
+    Хранится как «дата|тема|n»: после полуночи нумерация начинается заново."""
+    raw = await store.get_meta(f"session:{chat_id}") or ""
+    if not raw:
+        return None
+    day, _, rest = raw.partition("|")
+    theme, _, n = rest.rpartition("|")
+    return theme, int(n) if day == d.isoformat() else 0
+
+
+async def end_session(store: Store, chat_id: int) -> None:
+    await store.set_meta(f"session:{chat_id}", "")
+    await store.set_meta(f"current:{chat_id}", "")
+
+
+async def summary(store: Store, cfg: Config, theme: str) -> str:
+    ok, fail = await store.theme_today(today(cfg), theme)
+    return f"«{name(theme)}» сегодня: знал {ok}, не знал {fail}."
+
+
+async def ask(bot: Bot, chat_id: int, store: Store, card, label: str) -> None:
     # какой карточке адресован следующий текст из этого чата
     await store.set_meta(f"current:{chat_id}", card["id"])
-    buttons = [("Не помню", f"n:{card['id']}")] + ([("Хватит", "stop")] if stop else [])
     await bot.send_message(
         chat_id, f"<b>{label}</b>\n{render.question(card)}\n\n<i>Ответ напиши сообщением.</i>",
-        reply_markup=kb(*buttons))
+        reply_markup=kb(("Не помню", f"n:{card['id']}"), ("Хватит", "stop")))
 
 
 async def send_next(bot: Bot, chat_id: int, store: Store, cfg: Config) -> None:
     d = today(cfg)
-    # норма: без «Хватит», номер из всей нормы дня
-    card = await store.next_card(d, cfg.new_per_day, cfg.max_per_day)
-    if card:
-        done = await store.answered(d)
-        total = done + await store.to_do(d, cfg.new_per_day, cfg.max_per_day)
-        await ask(bot, chat_id, store, card, f"Вопрос {done + 1}/{total}", stop=False)
-        return
-    # сверх нормы: только новые карточки, своя нумерация до «Хватит»
-    n = await extra_count(store, chat_id, d)
-    if n is not None:
-        card = await store.next_new(d)
-        if card:
-            await store.set_meta(f"extra:{chat_id}", f"{d.isoformat()}:{n + 1}")
-            await ask(bot, chat_id, store, card, f"Дополнительный вопрос {n + 1}", stop=True)
-            return
-        await store.set_meta(f"extra:{chat_id}", "")
+    s = await session(store, chat_id, d)
+    if s is None:
         await store.set_meta(f"current:{chat_id}", "")
-        await bot.send_message(chat_id, "Новых карточек больше нет. Остальные придут по расписанию.")
+        await show_menu(bot, chat_id, store, cfg)
         return
-    await store.set_meta(f"current:{chat_id}", "")
-    s = await store.stats(d)
-    more = "\n\nМожно ещё поотвечать: /go - новые карточки сверх нормы." if s["unseen"] else ""
-    await bot.send_message(
-        chat_id,
-        f"На сегодня всё.\nЗнал: {s['ok_today']}, не знал: {s['fail_today']}.\n"
-        f"Завтра к повторению: {s['due_tomorrow']}.{more}",
-    )
-
-
-async def go(bot: Bot, chat_id: int, store: Store, cfg: Config) -> None:
-    d = today(cfg)
-    # норма сделана - /go начинает серию сверх нормы, нумерация с 1
-    if not await store.next_card(d, cfg.new_per_day, cfg.max_per_day):
-        await store.set_meta(f"extra:{chat_id}", f"{d.isoformat()}:0")
-    await send_next(bot, chat_id, store, cfg)
+    theme, n = s
+    card = await store.next_in(d, theme)
+    if card:
+        await store.set_meta(f"session:{chat_id}", f"{d.isoformat()}|{theme}|{n + 1}")
+        await ask(bot, chat_id, store, card, f"{name(theme)} · вопрос {n + 1}")
+        return
+    head = (f"Тема «{name(theme)}» на сегодня пройдена: возвратов нет, новые кончились.\n"
+            + await summary(store, cfg, theme))
+    await end_session(store, chat_id)
+    await show_menu(bot, chat_id, store, cfg, head)
 
 
 @router.message(Command("start"))
-async def start(msg: Message, store: Store, cfg: Config):
-    n = await left(store, cfg)
-    await msg.answer(
+async def start(msg: Message, bot: Bot, store: Store, cfg: Config):
+    await show_menu(
+        bot, msg.chat.id, store, cfg,
         "Карточки из базы знаний.\n"
         "Ответ пишешь сообщением, своими словами. Бот ищет в нём ключевые пункты,\n"
-        "опечатки и сокращения прощает. Не помнишь - «Не помню».\n\n"
-        f"Сегодня карточек: {n}.",
-        reply_markup=GO if n else None,
-    )
+        "опечатки и сокращения прощает. Не помнишь - «Не помню».\n"
+        "В теме сначала возвраты, у которых подошёл срок, потом новые.")
 
 
 @router.message(Command("go"))
 async def go_cmd(msg: Message, bot: Bot, store: Store, cfg: Config):
-    await go(bot, msg.chat.id, store, cfg)
+    await show_menu(bot, msg.chat.id, store, cfg)
 
 
 @router.callback_query(F.data == "go")
 async def go_btn(cb: CallbackQuery, bot: Bot, store: Store, cfg: Config):
+    # кнопка «Продолжить» из сообщений до меню тем
     await cb.answer()
-    await go(bot, cb.message.chat.id, store, cfg)
+    await show_menu(bot, cb.message.chat.id, store, cfg)
+
+
+@router.callback_query(F.data.startswith("t:"))
+async def pick_theme(cb: CallbackQuery, bot: Bot, store: Store, cfg: Config):
+    # другая тема посреди серии: прошлая карточка без ответа просто не оценивается
+    await cb.answer()
+    await store.set_meta(f"session:{cb.message.chat.id}", f"{today(cfg).isoformat()}|{cb.data[2:]}|0")
+    await send_next(bot, cb.message.chat.id, store, cfg)
 
 
 @router.callback_query(F.data == "stop")
-async def stop(cb: CallbackQuery, store: Store, cfg: Config):
-    # «Хватит» есть только сверх нормы. карточка без ответа просто не засчитывается
+async def stop(cb: CallbackQuery, bot: Bot, store: Store, cfg: Config):
+    # карточка без ответа не засчитывается и остаётся, где была
     await cb.answer()
     chat_id = cb.message.chat.id
-    await store.set_meta(f"extra:{chat_id}", "")
-    await store.set_meta(f"current:{chat_id}", "")
+    s = await session(store, chat_id, today(cfg))
+    await end_session(store, chat_id)
     await cb.message.edit_reply_markup(reply_markup=None)
-    n = await left(store, cfg)
-    await cb.message.answer(f"Остановлено. По норме осталось: {n}. /go - продолжить." if n
-                            else "Остановлено. Ещё поотвечать - /go.")
+    await show_menu(bot, chat_id, store, cfg,
+                    "Остановлено. " + (await summary(store, cfg, s[0]) if s else ""))
 
 
 @router.callback_query(F.data.startswith("n:"))
@@ -232,7 +250,7 @@ async def reload(msg: Message, store: Store, cfg: Config):
 async def typed_answer(msg: Message, bot: Bot, store: Store, cfg: Config):
     card = await store.card(await store.get_meta(f"current:{msg.chat.id}") or "")
     if card is None:
-        await msg.answer("Сейчас нет вопроса. /go - начать.")
+        await show_menu(bot, msg.chat.id, store, cfg, "Сейчас нет вопроса.")
         return
     if len(grader.tokens(msg.text)) < MIN_WORDS:
         await msg.answer("Коротко. Ответь, как на собесе: что происходит и почему.")
@@ -264,23 +282,25 @@ async def reminder(bot: Bot, store: Store, cfg: Config) -> None:
     while True:
         try:
             now = datetime.now(cfg.tz)
-            d = now.date().isoformat()
-            # в REMIND_AT серия начинается сама, с первой карточки
-            if now.time() >= cfg.remind_at and await store.get_meta("reminded") != d:
-                n = await left(store, cfg)
-                for uid in cfg.allowed if n else ():
-                    if await notify(bot, uid, f"Норма на сегодня: {n}."):
-                        await send_next(bot, uid, store, cfg)
-                await store.set_meta("reminded", d)
+            d = now.date()
+            # в REMIND_AT меню всегда: даже без возвратов есть новые
+            if now.time() >= cfg.remind_at and await store.get_meta("reminded") != d.isoformat():
+                n = await store.due_count(d)
+                head = f"Пора повторять. К повторению сегодня: {n}." if n else "Пора повторять."
+                for uid in cfg.allowed:
+                    text, markup = await menu(store, cfg)
+                    await notify(bot, uid, f"{head}\n\n{text}", reply_markup=markup)
+                await store.set_meta("reminded", d.isoformat())
                 # бот поднят после NUDGE_AT: второй раз в ту же минуту не дёргать
                 if now.time() >= cfg.nudge_at:
-                    await store.set_meta("nudged", d)
-            # в NUDGE_AT, если норма не добита
-            if now.time() >= cfg.nudge_at and await store.get_meta("nudged") != d:
-                n = await left(store, cfg)
+                    await store.set_meta("nudged", d.isoformat())
+            # в NUDGE_AT, если возвраты не пройдены
+            if now.time() >= cfg.nudge_at and await store.get_meta("nudged") != d.isoformat():
+                n = await store.due_count(d)
                 for uid in cfg.allowed if n else ():
-                    await notify(bot, uid, f"Норма не добита, осталось: {n}.", reply_markup=GO)
-                await store.set_meta("nudged", d)
+                    text, markup = await menu(store, cfg)
+                    await notify(bot, uid, f"Не повторено сегодня: {n}.\n\n{text}", reply_markup=markup)
+                await store.set_meta("nudged", d.isoformat())
         except Exception:
             # база перезапускается: напоминание не должно умереть насовсем
             log.exception("напоминание упало, следующая попытка через минуту")

@@ -50,7 +50,13 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- кнопка меню. колонка добавлена позже: старая база доращивается тут
+ALTER TABLE cards ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT '';
 """
+# тема «всё вперемешку»
+ALL = "*"
+# фильтр по теме: для ALL условие истинно всегда
+THEME_SQL = "(%s::text = '*' OR c.theme = %s::text)"
 
 
 class Store:
@@ -91,59 +97,59 @@ class Store:
             await conn.execute("UPDATE cards SET active = FALSE")
             async with conn.cursor() as cur:
                 await cur.executemany(
-                    "INSERT INTO cards (id, q, a, src, kind, keys, need, topic, ord, active)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)"
+                    "INSERT INTO cards (id, q, a, src, kind, keys, need, topic, theme, ord, active)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)"
                     " ON CONFLICT (id) DO UPDATE SET q = excluded.q, a = excluded.a,"
                     " src = excluded.src, kind = excluded.kind, keys = excluded.keys,"
-                    " need = excluded.need, topic = excluded.topic, ord = excluded.ord, active = TRUE",
-                    [(c.id, c.q, c.a, c.src, c.kind, Jsonb(list(c.keys)), c.need, c.topic, c.ord)
-                     for c in cards],
+                    " need = excluded.need, topic = excluded.topic, theme = excluded.theme,"
+                    " ord = excluded.ord, active = TRUE",
+                    [(c.id, c.q, c.a, c.src, c.kind, Jsonb(list(c.keys)), c.need, c.topic, c.theme,
+                      c.ord) for c in cards],
                 )
             off = await (await conn.execute("SELECT COUNT(*) AS n FROM cards WHERE NOT active")).fetchone()
         return len({c.id for c in cards} - before), off["n"]
 
-    async def answered(self, today: date) -> int:
-        return await self._count("SELECT COUNT(*) FROM log WHERE day = %s", today)
-
-    async def _new_left(self, today: date, new_per_day: int) -> int:
-        started = await self._count("SELECT COUNT(*) FROM progress WHERE introduced = %s", today)
-        return max(0, new_per_day - started)
-
-    async def next_card(self, today: date, new_per_day: int, max_per_day: int) -> dict | None:
-        """Сначала возвраты, самые старые первыми. Затем новые вперемешку по
-        темам: тема, из которой показано меньше всего, при равенстве порядок
-        тем свой на каждый день. Внутри темы - вперемешку, порядок тоже свой
-        на каждый день: иначе первыми всегда шли бы начала файлов."""
-        if await self.answered(today) >= max_per_day:
-            return None
+    async def next_in(self, today: date, theme: str) -> dict | None:
+        """Следующая карточка темы. Сначала возвраты, самые старые первыми.
+        Затем новые: файл темы, из которого показано меньше всего, при равенстве
+        порядок файлов свой на каждый день. Внутри файла вперемешку, порядок
+        тоже свой на каждый день: иначе первыми всегда шли бы начала файлов."""
         row = await self._one(
             "SELECT c.* FROM cards c JOIN progress p ON p.card_id = c.id"
-            " WHERE c.active AND p.due <= %s ORDER BY p.due, random() LIMIT 1", today)
-        if row or not await self._new_left(today, new_per_day):
+            f" WHERE c.active AND p.due <= %s AND {THEME_SQL}"
+            " ORDER BY p.due, random() LIMIT 1", today, theme, theme)
+        if row:
             return row
-        return await self.next_new(today)
-
-    async def next_new(self, today: date) -> dict | None:
-        """Новая карточка без учёта норм: для нормы и для вопросов сверх неё."""
+        d = today.isoformat()
         return await self._one(
             "WITH seen AS (SELECT c.topic, COUNT(*) AS n FROM progress p"
             " JOIN cards c ON c.id = p.card_id GROUP BY c.topic)"
             " SELECT c.* FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
             " LEFT JOIN seen s ON s.topic = c.topic"
-            " WHERE c.active AND p.card_id IS NULL"
+            f" WHERE c.active AND p.card_id IS NULL AND {THEME_SQL}"
             " ORDER BY COALESCE(s.n, 0), md5(c.topic || %s), md5(c.id || %s) LIMIT 1",
-            today.isoformat(), today.isoformat())
+            theme, theme, d, d)
 
-    async def to_do(self, today: date, new_per_day: int, max_per_day: int) -> int:
-        """Сколько карточек бот покажет сегодня, если пройти всё."""
-        due = await self._count(
+    async def themes(self, today: date) -> list[dict]:
+        """Для меню: по каждой теме сколько к повторению сегодня и сколько новых."""
+        return await self._all(
+            "SELECT c.theme, COUNT(*) FILTER (WHERE p.due <= %s) AS due,"
+            " COUNT(*) FILTER (WHERE p.card_id IS NULL) AS fresh"
+            " FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
+            " WHERE c.active GROUP BY c.theme ORDER BY c.theme", today)
+
+    async def theme_today(self, today: date, theme: str) -> tuple[int, int]:
+        """Знал / не знал сегодня в теме."""
+        row = await self._one(
+            "SELECT COUNT(*) FILTER (WHERE l.ok) AS ok, COUNT(*) FILTER (WHERE NOT l.ok) AS fail"
+            f" FROM log l JOIN cards c ON c.id = l.card_id WHERE l.day = %s AND {THEME_SQL}",
+            today, theme, theme)
+        return row["ok"], row["fail"]
+
+    async def due_count(self, today: date) -> int:
+        return await self._count(
             "SELECT COUNT(*) FROM cards c JOIN progress p ON p.card_id = c.id"
             " WHERE c.active AND p.due <= %s", today)
-        fresh = await self._count(
-            "SELECT COUNT(*) FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
-            " WHERE c.active AND p.card_id IS NULL")
-        left = max(0, max_per_day - await self.answered(today))
-        return min(left, due + min(fresh, await self._new_left(today, new_per_day)))
 
     async def grade(self, card_id: str, ok: bool, today: date, intervals: tuple[int, ...],
                     answer: str | None = None) -> int | None:

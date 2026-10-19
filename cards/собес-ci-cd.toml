@@ -1,6 +1,9 @@
 # Собес: CI/CD. Вопросы ZUBAT, ответы пересказаны просто.
 # kind М: чужой материал, руками не проверялось. keys: варианты через |.
 
+# кнопка в меню бота. несколько файлов могут вести на одну
+theme = "CI/CD и Git"
+
 [[card]]
 id = "z-ci-delivery-deployment"
 q = "Чем Continuous Integration, Continuous Delivery и Continuous Deployment отличаются друг от друга?"
