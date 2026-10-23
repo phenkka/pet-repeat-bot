@@ -1,11 +1,11 @@
-from datetime import date, timedelta
-
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from .cards import Card
 
+# Таблицы progress, log и disputes остались в старых базах от повторения
+# с проверкой ответов. Бот их больше не трогает и не удаляет.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
     id     TEXT PRIMARY KEY,
@@ -19,36 +19,14 @@ CREATE TABLE IF NOT EXISTS cards (
     ord    INTEGER NOT NULL,
     active BOOLEAN NOT NULL DEFAULT TRUE
 );
--- строки нет: карточка ещё не показывалась
-CREATE TABLE IF NOT EXISTS progress (
-    card_id    TEXT PRIMARY KEY REFERENCES cards(id),
-    box        INTEGER NOT NULL,
-    due        DATE NOT NULL,
-    introduced DATE NOT NULL
-);
-CREATE TABLE IF NOT EXISTS log (
-    id      BIGSERIAL PRIMARY KEY,
-    card_id TEXT NOT NULL REFERENCES cards(id),
-    day     DATE NOT NULL,
-    ok      BOOLEAN NOT NULL,
-    ts      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- свой ответ: по промахам дописываются варианты в keys
-    answer  TEXT
-);
-CREATE INDEX IF NOT EXISTS log_day ON log (day);
--- «Оспорить»: ответ не засчитан, а ты считаешь его верным
-CREATE TABLE IF NOT EXISTS disputes (
-    id      BIGSERIAL PRIMARY KEY,
-    card_id TEXT NOT NULL REFERENCES cards(id),
-    day     DATE NOT NULL,
-    answer  TEXT NOT NULL,
-    status  TEXT NOT NULL DEFAULT 'open',
-    ts      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (card_id, day)
-);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+-- добавленные админом через /adduser. админы из .env сюда не пишутся
+CREATE TABLE IF NOT EXISTS users (
+    id    BIGINT PRIMARY KEY,
+    added TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- кнопка меню. колонка добавлена позже: старая база доращивается тут
 ALTER TABLE cards ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT '';
@@ -84,14 +62,13 @@ class Store:
         async with self.pool.connection() as conn:
             return await (await conn.execute(sql, args)).fetchall()
 
-    async def _count(self, sql: str, *args) -> int:
-        row = await self._one(sql, *args)
-        return next(iter(row.values()))
+    async def _exec(self, sql: str, *args) -> int:
+        async with self.pool.connection() as conn:
+            return (await conn.execute(sql, args)).rowcount
 
     async def sync(self, cards: list[Card]) -> tuple[int, int]:
-        """Карточки из файлов в базу. Прогресс не трогается: правка текста
-        карточки не сбрасывает её интервал. Убранные из файлов гасятся,
-        а не удаляются, чтобы вернуть их можно было с историей."""
+        """Карточки из файлов в базу. Убранные из файлов гасятся, а не
+        удаляются: на них ссылается старая история."""
         async with self.pool.connection() as conn, conn.transaction():
             before = {r["id"] for r in await (await conn.execute("SELECT id FROM cards")).fetchall()}
             await conn.execute("UPDATE cards SET active = FALSE")
@@ -109,135 +86,41 @@ class Store:
             off = await (await conn.execute("SELECT COUNT(*) AS n FROM cards WHERE NOT active")).fetchone()
         return len({c.id for c in cards} - before), off["n"]
 
-    async def next_in(self, today: date, theme: str) -> dict | None:
-        """Следующая карточка темы. Сначала возвраты, самые старые первыми.
-        Затем новые: файл темы, из которого показано меньше всего, при равенстве
-        порядок файлов свой на каждый день. Внутри файла вперемешку, порядок
-        тоже свой на каждый день: иначе первыми всегда шли бы начала файлов."""
-        row = await self._one(
-            "SELECT c.* FROM cards c JOIN progress p ON p.card_id = c.id"
-            f" WHERE c.active AND p.due <= %s AND {THEME_SQL}"
-            " ORDER BY p.due, random() LIMIT 1", today, theme, theme)
-        if row:
-            return row
-        d = today.isoformat()
+    async def themes(self) -> list[dict]:
+        """Для меню: темы и сколько в каждой карточек."""
+        return await self._all(
+            "SELECT theme, COUNT(*) AS n FROM cards WHERE active GROUP BY theme ORDER BY theme")
+
+    async def deck_size(self, theme: str) -> int:
+        row = await self._one(f"SELECT COUNT(*) AS n FROM cards c WHERE c.active AND {THEME_SQL}",
+                              theme, theme)
+        return row["n"]
+
+    async def card_at(self, theme: str, seed: str, n: int) -> dict | None:
+        """n-я карточка колоды. Колода - карточки темы, перемешанные по seed:
+        один seed на проход, поэтому без повторов, а новый проход - новый порядок."""
         return await self._one(
-            "WITH seen AS (SELECT c.topic, COUNT(*) AS n FROM progress p"
-            " JOIN cards c ON c.id = p.card_id GROUP BY c.topic)"
-            " SELECT c.* FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
-            " LEFT JOIN seen s ON s.topic = c.topic"
-            f" WHERE c.active AND p.card_id IS NULL AND {THEME_SQL}"
-            " ORDER BY COALESCE(s.n, 0), md5(c.topic || %s), md5(c.id || %s) LIMIT 1",
-            theme, theme, d, d)
-
-    async def themes(self, today: date) -> list[dict]:
-        """Для меню: по каждой теме сколько к повторению сегодня и сколько новых."""
-        return await self._all(
-            "SELECT c.theme, COUNT(*) FILTER (WHERE p.due <= %s) AS due,"
-            " COUNT(*) FILTER (WHERE p.card_id IS NULL) AS fresh"
-            " FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
-            " WHERE c.active GROUP BY c.theme ORDER BY c.theme", today)
-
-    async def theme_today(self, today: date, theme: str) -> tuple[int, int]:
-        """Знал / не знал сегодня в теме."""
-        row = await self._one(
-            "SELECT COUNT(*) FILTER (WHERE l.ok) AS ok, COUNT(*) FILTER (WHERE NOT l.ok) AS fail"
-            f" FROM log l JOIN cards c ON c.id = l.card_id WHERE l.day = %s AND {THEME_SQL}",
-            today, theme, theme)
-        return row["ok"], row["fail"]
-
-    async def due_count(self, today: date) -> int:
-        return await self._count(
-            "SELECT COUNT(*) FROM cards c JOIN progress p ON p.card_id = c.id"
-            " WHERE c.active AND p.due <= %s", today)
-
-    async def grade(self, card_id: str, ok: bool, today: date, intervals: tuple[int, ...],
-                    answer: str | None = None) -> int | None:
-        """Ставит оценку, возвращает интервал в днях. None, если карточка
-        сегодня уже оценена (двойное нажатие) или ей ещё рано (кнопка
-        в старом сообщении)."""
-        async with self.pool.connection() as conn, conn.transaction():
-            done = await (await conn.execute(
-                "SELECT 1 FROM log WHERE card_id = %s AND day = %s", (card_id, today))).fetchone()
-            if done:
-                return None
-            row = await (await conn.execute(
-                "SELECT box, due FROM progress WHERE card_id = %s FOR UPDATE", (card_id,))).fetchone()
-            if row and row["due"] > today:
-                return None
-            box = row["box"] if row else 0
-            # ошибся: сброс на +1 и лестница интервалов заново
-            days = intervals[min(box, len(intervals) - 1)] if ok else intervals[0]
-            await conn.execute(
-                "INSERT INTO progress (card_id, box, due, introduced) VALUES (%s, %s, %s, %s)"
-                " ON CONFLICT (card_id) DO UPDATE SET box = excluded.box, due = excluded.due",
-                (card_id, box + 1 if ok else 0, today + timedelta(days=days), today))
-            await conn.execute(
-                "INSERT INTO log (card_id, day, ok, answer) VALUES (%s, %s, %s, %s)",
-                (card_id, today, ok, answer))
-        return days
-
-    async def downgrade(self, card_id: str, today: date, intervals: tuple[int, ...]) -> int | None:
-        """«Всё равно не знал»: засчитанное сегодня переводится в незнание.
-        Обратного хода нет, иначе проверка теряет смысл."""
-        async with self.pool.connection() as conn, conn.transaction():
-            cur = await conn.execute(
-                "UPDATE log SET ok = FALSE WHERE card_id = %s AND day = %s AND ok", (card_id, today))
-            if not cur.rowcount:
-                return None
-            await conn.execute(
-                "UPDATE progress SET box = 0, due = %s WHERE card_id = %s",
-                (today + timedelta(days=intervals[0]), card_id))
-        return intervals[0]
-
-    async def dispute(self, card_id: str, today: date) -> int | None:
-        """Спор по сегодняшнему незасчитанному ответу. Оценку не меняет:
-        засчитать задним числом нельзя, разбор только по ответу."""
-        row = await self._one(
-            "INSERT INTO disputes (card_id, day, answer)"
-            " SELECT card_id, day, answer FROM log"
-            " WHERE card_id = %s AND day = %s AND NOT ok AND answer IS NOT NULL"
-            " ON CONFLICT (card_id, day) DO NOTHING RETURNING id", card_id, today)
-        return row["id"] if row else None
-
-    async def open_disputes(self) -> list[dict]:
-        return await self._all(
-            "SELECT d.id, d.card_id, d.day, d.answer, c.keys, c.need"
-            " FROM disputes d JOIN cards c ON c.id = d.card_id"
-            " WHERE d.status = 'open' ORDER BY d.id")
-
-    async def close_dispute(self, dispute_id: int, status: str) -> bool:
-        async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "UPDATE disputes SET status = %s WHERE id = %s AND status = 'open'", (status, dispute_id))
-            return bool(cur.rowcount)
+            f"SELECT c.* FROM cards c WHERE c.active AND {THEME_SQL}"
+            " ORDER BY md5(c.id || %s) OFFSET %s LIMIT 1", theme, theme, seed, n)
 
     async def card(self, card_id: str) -> dict | None:
         return await self._one("SELECT * FROM cards WHERE id = %s", card_id)
 
-    async def stats(self, today: date) -> dict:
-        return {
-            "active": await self._count("SELECT COUNT(*) FROM cards WHERE active"),
-            "unseen": await self._count(
-                "SELECT COUNT(*) FROM cards c LEFT JOIN progress p ON p.card_id = c.id"
-                " WHERE c.active AND p.card_id IS NULL"),
-            "ok_today": await self._count("SELECT COUNT(*) FROM log WHERE day = %s AND ok", today),
-            "fail_today": await self._count("SELECT COUNT(*) FROM log WHERE day = %s AND NOT ok", today),
-            "due_tomorrow": await self._count(
-                "SELECT COUNT(*) FROM cards c JOIN progress p ON p.card_id = c.id"
-                " WHERE c.active AND p.due <= %s", today + timedelta(days=1)),
-            "disputes": await self._count("SELECT COUNT(*) FROM disputes WHERE status = 'open'"),
-            "boxes": [(r["box"], r["n"]) for r in await self._all(
-                "SELECT p.box, COUNT(*) AS n FROM progress p JOIN cards c ON c.id = p.card_id"
-                " WHERE c.active GROUP BY p.box ORDER BY p.box")],
-        }
+    async def users(self) -> set[int]:
+        return {r["id"] for r in await self._all("SELECT id FROM users")}
+
+    async def add_user(self, uid: int) -> bool:
+        return bool(await self._exec(
+            "INSERT INTO users (id) VALUES (%s) ON CONFLICT DO NOTHING", uid))
+
+    async def del_user(self, uid: int) -> bool:
+        return bool(await self._exec("DELETE FROM users WHERE id = %s", uid))
 
     async def get_meta(self, key: str) -> str | None:
         row = await self._one("SELECT value FROM meta WHERE key = %s", key)
         return row["value"] if row else None
 
     async def set_meta(self, key: str, value: str) -> None:
-        async with self.pool.connection() as conn:
-            await conn.execute(
-                "INSERT INTO meta (key, value) VALUES (%s, %s)"
-                " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value))
+        await self._exec(
+            "INSERT INTO meta (key, value) VALUES (%s, %s)"
+            " ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, value)

@@ -1,8 +1,6 @@
 import os
 from dataclasses import dataclass
-from datetime import time
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from psycopg.conninfo import make_conninfo
 
@@ -10,27 +8,20 @@ from psycopg.conninfo import make_conninfo
 @dataclass(frozen=True)
 class Config:
     token: str
-    allowed: frozenset[int]
-    tz: ZoneInfo
-    remind_at: time
-    nudge_at: time
-    intervals: tuple[int, ...]
+    # админы из .env: всегда есть доступ, могут добавлять пользователей
+    admins: frozenset[int]
     cards_dir: Path
     db: str
 
 
 def load() -> Config:
-    # без белого списка не стартуем: бот без него отдаёт карточки любому
-    allowed = frozenset(int(x) for x in os.environ["ALLOWED_USER_IDS"].split(",") if x.strip())
-    if not allowed:
+    # без админа не стартуем: иначе добавить пользователей некому
+    admins = frozenset(int(x) for x in os.environ["ALLOWED_USER_IDS"].split(",") if x.strip())
+    if not admins:
         raise SystemExit("ALLOWED_USER_IDS пуст")
     return Config(
         token=os.environ["BOT_TOKEN"],
-        allowed=allowed,
-        tz=ZoneInfo(os.environ.get("TZ_NAME", "Asia/Yekaterinburg")),
-        remind_at=time.fromisoformat(os.environ.get("REMIND_AT", "13:00")),
-        nudge_at=time.fromisoformat(os.environ.get("NUDGE_AT", "20:00")),
-        intervals=tuple(int(x) for x in os.environ.get("INTERVALS", "1,3,7,21,60").split(",")),
+        admins=admins,
         cards_dir=Path(os.environ.get("CARDS_DIR", "cards")),
         # пароль из файла (секрет compose), а не из переменной: env видно в docker inspect
         db=make_conninfo(

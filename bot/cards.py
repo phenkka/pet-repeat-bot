@@ -47,12 +47,12 @@ def load(cards_dir: Path) -> list[Card]:
                     raise ValueError(f"{where}: пустое поле {field}")
             if raw.get("kind") not in KINDS:
                 raise ValueError(f"{where}: kind должен быть С или М")
+            # keys и need остались от проверки ответов: бот их не читает,
+            # но хранит, чтобы проверку можно было вернуть без правки карточек
             keys = raw.get("keys", [])
-            if not keys or not all(isinstance(k, str) and k.strip() for k in keys):
-                raise ValueError(f"{where}: keys - непустой список строк")
+            if not all(isinstance(k, str) for k in keys):
+                raise ValueError(f"{where}: keys - список строк")
             need = raw.get("need")
-            if need is not None and not 1 <= need <= len(keys):
-                raise ValueError(f"{where}: need от 1 до числа keys")
             seen.add(cid)
             cards.append(Card(
                 id=cid, q=raw["q"].strip(), a=raw["a"].strip(), src=raw["src"].strip(),
@@ -61,10 +61,3 @@ def load(cards_dir: Path) -> list[Card]:
             ))
     return cards
 
-
-def load_aliases(cards_dir: Path) -> dict[str, str]:
-    path = cards_dir / "_aliases.toml"
-    if not path.exists():
-        return {}
-    data = tomllib.loads(path.read_text(encoding="utf-8")).get("alias", {})
-    return {k.lower().replace("ё", "е"): v.lower() for k, v in data.items()}
